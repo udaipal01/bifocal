@@ -211,10 +211,10 @@ def run_agent(email_text: str, original_doc: dict, revised_doc: dict) -> dict:
 
 def format_summary(comments: list) -> str:
     """Turn the agent JSON into a banker-style email body."""
-    implemented = [c for c in comments if c["status"] == "implemented"]
-    partial = [c for c in comments if c["status"] == "partially_implemented"]
-    missed = [c for c in comments if c["status"] == "not_implemented"]
-    unclear = [c for c in comments if c["status"] == "unclear"]
+    implemented = _sort_by_slide([c for c in comments if c["status"] == "implemented"])
+    partial = _sort_by_slide([c for c in comments if c["status"] == "partially_implemented"])
+    missed = _sort_by_slide([c for c in comments if c["status"] == "not_implemented"])
+    unclear = _sort_by_slide([c for c in comments if c["status"] == "unclear"])
 
     lines = []
     lines.append(f"Coverage summary:")
@@ -223,35 +223,43 @@ def format_summary(comments: list) -> str:
     lines.append(f"- Not implemented: {len(missed)}")
     lines.append(f"- Unclear: {len(unclear)}\n")
 
-    if partial:
-        lines.append("Partially implemented:")
-        for c in partial:
-            lines.append(
-                f"- {c['id']} (slides {c['slide_refs']}): {c['text']}\n"
-                f"  Reason: {c['reason']}\n"
-                f"  Suggestion: {c['suggestion']}"
-            )
-        lines.append("")
+    sections = [
+        ("Implemented", implemented, False),
+        ("Partially implemented", partial, True),
+        ("Not implemented", missed, True),
+        ("Unclear / needs human review", unclear, False),
+    ]
 
-    if missed:
-        lines.append("Not implemented:")
-        for c in missed:
-            lines.append(
-                f"- {c['id']} (slides {c['slide_refs']}): {c['text']}\n"
-                f"  Reason: {c['reason']}\n"
-                f"  Suggestion: {c['suggestion']}"
-            )
+    for title, bucket, include_suggestion in sections:
+        if not bucket:
+            continue
+        lines.append(f"{title}:")
+        lines.extend(_format_slide_blocks(bucket, include_suggestion))
         lines.append("")
-
-    if unclear:
-        lines.append("Unclear / needs human review:")
-        for c in unclear:
-            lines.append(
-                f"- {c['id']} (slides {c['slide_refs']}): {c['text']}\n"
-                f"  Reason: {c['reason']}"
-            )
 
     return "\n".join(lines)
+
+
+def _sort_by_slide(comments: list) -> list:
+    def slide_key(comment):
+        refs = comment.get("slide_refs") or []
+        return min(refs) if refs else float("inf")
+
+    return sorted(comments, key=slide_key)
+
+
+def _format_slide_blocks(comments: list, include_suggestion: bool) -> list:
+    blocks = []
+    sorted_comments = _sort_by_slide(comments)
+    for c in sorted_comments:
+        slide_refs = c.get("slide_refs") or ["n/a"]
+        slide_fmt = ", ".join(str(ref) for ref in slide_refs)
+        blocks.append(f"Slide {slide_fmt}:")
+        blocks.append(f"▪ Comment {c['id']}: {c['text']}")
+        blocks.append(f"   ◦ Reason: {c['reason']}")
+        if include_suggestion and c.get("suggestion"):
+            blocks.append(f"   ◦ Suggestion: {c['suggestion']}")
+    return blocks
 
 
 # ---------- Main processing: read email → agent → send email ----------
