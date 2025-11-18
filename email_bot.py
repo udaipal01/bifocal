@@ -14,10 +14,11 @@ from typing import List, Optional, Tuple
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
-from agent_runner import run_agent_workflow
-
-
+# Load environment before importing modules that rely on OPENAI_API_KEY
+from dotenv import load_dotenv
 load_dotenv()
+
+from agent_runner import run_agent_workflow  # noqa: E402
 
 IMAP_HOST = os.getenv("EMAIL_IMAP_HOST", "imap.gmail.com")
 SMTP_HOST = os.getenv("EMAIL_SMTP_HOST", "smtp.gmail.com")
@@ -196,46 +197,83 @@ def run_agent(email_text: str, original_doc: dict, revised_doc: dict) -> dict:
     # And ensure it returns the JSON matching your Node 3 schema.
 
     # For now, we’ll assume there is a synchronous helper:
+    lowered = (email_text or "").lower()
+    only_tick = "only tie out" in lowered or "only tick and tie" in lowered
+    run_tick_tie = "tie out" in lowered or "tick and tie" in lowered
+
     result = run_agent_workflow(
-        email_text = email_text,
-        original_doc = original_doc,
-        revised_doc = revised_doc,
+        email_text=email_text,
+        original_doc=original_doc,
+        revised_doc=revised_doc,
+        run_tick_tie=run_tick_tie,
     )
 
-    # Make sure `result` is a plain Python dict:
-    # e.g. {"comments": [...]} as per your Node 3 schema
+    if only_tick:
+        return {
+            "tags": [],
+            "email_comments": [],
+            "tick_tie": result.get("tick_tie") or {"ties_out": [], "check": []},
+        }
+
     return result
 
 
 # ---------- Formatting the reply email ----------
 
-def format_summary(comments: list) -> str:
+def format_summary(tags_comments: list, email_comments: list, tick_tie: dict | None = None) -> str:
     """Turn the agent JSON into a banker-style email body."""
-    implemented = _sort_by_slide([c for c in comments if c["status"] == "implemented"])
-    partial = _sort_by_slide([c for c in comments if c["status"] == "partially_implemented"])
-    missed = _sort_by_slide([c for c in comments if c["status"] == "not_implemented"])
-    unclear = _sort_by_slide([c for c in comments if c["status"] == "unclear"])
+    def buckets(comments: list):
+        return (
+            _sort_by_slide([c for c in comments if c["status"] == "implemented"]),
+            _sort_by_slide([c for c in comments if c["status"] == "partially_implemented"]),
+            _sort_by_slide([c for c in comments if c["status"] == "not_implemented"]),
+            _sort_by_slide([c for c in comments if c["status"] == "unclear"]),
+        )
+
+    tags_impl, tags_part, tags_miss, tags_unclear = buckets(tags_comments)
+    email_impl, email_part, email_miss, email_unclear = buckets(email_comments)
 
     lines = []
-    lines.append(f"Coverage summary:")
-    lines.append(f"- Implemented: {len(implemented)}")
-    lines.append(f"- Partially implemented: {len(partial)}")
-    lines.append(f"- Not implemented: {len(missed)}")
-    lines.append(f"- Unclear: {len(unclear)}\n")
+    lines.append("Coverage summary:")
+    lines.append(f"- Tags: {len(tags_impl)} implemented, {len(tags_part)} partial, {len(tags_miss)} not, {len(tags_unclear)} unclear")
+    lines.append(f"- Email: {len(email_impl)} implemented, {len(email_part)} partial, {len(email_miss)} not, {len(email_unclear)} unclear\n")
 
-    sections = [
-        ("Implemented", implemented, False),
-        ("Partially implemented", partial, True),
-        ("Not implemented", missed, True),
-        ("Unclear / needs human review", unclear, False),
-    ]
-
-    for title, bucket, include_suggestion in sections:
-        if not bucket:
-            continue
+    for title, impl, part, miss, unclear in [
+        ("Tags", tags_impl, tags_part, tags_miss, tags_unclear),
+        ("Email", email_impl, email_part, email_miss, email_unclear),
+    ]:
         lines.append(f"{title}:")
-        lines.extend(_format_slide_blocks(bucket, include_suggestion))
+        section = [
+            ("Implemented", impl, False),
+            ("Partially implemented", part, True),
+            ("Not implemented", miss, True),
+            ("Unclear / needs human review", unclear, False),
+        ]
+        for label, bucket, include_suggestion in section:
+            if not bucket:
+                continue
+            lines.append(f"{label}:")
+            lines.extend(_format_bucket_by_slide(bucket, include_suggestion))
+            lines.append("")
         lines.append("")
+
+    if tick_tie is not None:
+        lines.append("Tick & tie review:")
+        ties_out = tick_tie.get("ties_out") or []
+        check = tick_tie.get("check") or []
+        if ties_out:
+            lines.append("- Consistent:")
+            for item in ties_out:
+                pages = ", ".join(str(p) for p in item.get("pages", []))
+                lines.append(f"  - {item.get('metric_label')}: {item.get('canonical_value')} (pages {pages})")
+        if check:
+            lines.append("- Inconsistencies to review:")
+            for item in check:
+                lines.append(f"  - {item.get('metric_label')}:")
+                for vb in item.get("values_by_page", []):
+                    lines.append(f"    - Page {vb.get('page')}: {vb.get('value')}")
+                if item.get("reason"):
+                    lines.append(f"    Reason: {item['reason']}")
 
     return "\n".join(lines)
 
@@ -248,18 +286,22 @@ def _sort_by_slide(comments: list) -> list:
     return sorted(comments, key=slide_key)
 
 
-def _format_slide_blocks(comments: list, include_suggestion: bool) -> list:
-    blocks = []
-    sorted_comments = _sort_by_slide(comments)
-    for c in sorted_comments:
-        slide_refs = c.get("slide_refs") or ["n/a"]
-        slide_fmt = ", ".join(str(ref) for ref in slide_refs)
-        blocks.append(f"Slide {slide_fmt}:")
-        blocks.append(f"▪ Comment {c['id']}: {c['text']}")
-        blocks.append(f"   ◦ Reason: {c['reason']}")
-        if include_suggestion and c.get("suggestion"):
-            blocks.append(f"   ◦ Suggestion: {c['suggestion']}")
-    return blocks
+def _format_bucket_by_slide(comments: list, include_suggestion: bool) -> list:
+    grouped = {}
+    for c in comments:
+        refs = c.get("slide_refs") or ["n/a"]
+        key = ", ".join(str(r) for r in refs)
+        grouped.setdefault(key, []).append(c)
+
+    lines: list[str] = []
+    for slide in sorted(grouped, key=lambda s: float(s.split(",")[0]) if s != "n/a" else float("inf")):
+        lines.append(f"- Slide {slide}:")
+        for c in _sort_by_slide(grouped[slide]):
+            lines.append(f"    - Comment {c['id']}: {c['text']}")
+            lines.append(f"      Reason: {c['reason']}")
+            if include_suggestion and c.get("suggestion"):
+                lines.append(f"      Suggestion: {c['suggestion']}")
+    return lines
 
 
 # ---------- Main processing: read email → agent → send email ----------
@@ -273,25 +315,29 @@ def process_one_email(raw_msg: bytes):
         if att["filename"] and att["filename"].lower().endswith(".pptx")
     ]
 
-    if len(pptx_attachments) < 2:
-        print("Expected at least 2 PPTX attachments (original + revised); skipping.")
+    if len(pptx_attachments) == 0:
+        print("No PPTX attachments found; skipping.")
         return
-
-    original_att, revised_att = _choose_original_and_revised(pptx_attachments)
-    original_path, revised_path = original_att["path"], revised_att["path"]
-
-    original_doc = pptx_to_struct(original_path)
-    revised_doc = pptx_to_struct(revised_path)
+    elif len(pptx_attachments) == 1:
+        revised_att = pptx_attachments[0]
+        original_doc = {}
+        revised_doc = pptx_to_struct(revised_att["path"])
+    else:
+        original_att, revised_att = _choose_original_and_revised(pptx_attachments)
+        original_doc = pptx_to_struct(original_att["path"])
+        revised_doc = pptx_to_struct(revised_att["path"])
 
     result = run_agent(email_text, original_doc, revised_doc)
-    comments = result["comments"]
+    tags_comments = result.get("tags", [])
+    email_comments = result.get("email_comments", [])
+    tick_tie = result.get("tick_tie")
 
-    summary = format_summary(comments)
+    summary = format_summary(tags_comments, email_comments, tick_tie)
 
     # Send reply to yourself (or to original sender)
     send_email(
         to_addr=from_addr,
-        subject=f"Re: {subject} [Comment coverage]",
+        subject=f"Re: {subject} [Bifocal Review]",
         body=summary,
     )
 
