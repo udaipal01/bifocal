@@ -213,14 +213,16 @@ def run_agent(email_text: str, original_doc: dict, revised_doc: dict) -> dict:
             "tags": [],
             "email_comments": [],
             "tick_tie": result.get("tick_tie") or {"ties_out": [], "check": []},
+            "only_tick": True,
         }
 
+    result["only_tick"] = False
     return result
 
 
 # ---------- Formatting the reply email ----------
 
-def format_summary(tags_comments: list, email_comments: list, tick_tie: dict | None = None) -> str:
+def format_summary(tags_comments: list, email_comments: list, tick_tie: dict | None = None, show_comments: bool = True) -> str:
     """Turn the agent JSON into a banker-style email body."""
     def buckets(comments: list):
         return (
@@ -234,46 +236,55 @@ def format_summary(tags_comments: list, email_comments: list, tick_tie: dict | N
     email_impl, email_part, email_miss, email_unclear = buckets(email_comments)
 
     lines = []
-    lines.append("Coverage summary:")
-    lines.append(f"- Tags: {len(tags_impl)} implemented, {len(tags_part)} partial, {len(tags_miss)} not, {len(tags_unclear)} unclear")
-    lines.append(f"- Email: {len(email_impl)} implemented, {len(email_part)} partial, {len(email_miss)} not, {len(email_unclear)} unclear\n")
+    if show_comments:
+        lines.append("Coverage summary:")
+        lines.append(f"- Tags: {len(tags_impl)} implemented, {len(tags_part)} partial, {len(tags_miss)} not, {len(tags_unclear)} unclear")
+        lines.append(f"- Email: {len(email_impl)} implemented, {len(email_part)} partial, {len(email_miss)} not, {len(email_unclear)} unclear\n")
 
-    for title, impl, part, miss, unclear in [
-        ("Tags", tags_impl, tags_part, tags_miss, tags_unclear),
-        ("Email", email_impl, email_part, email_miss, email_unclear),
-    ]:
-        lines.append(f"{title}:")
-        section = [
-            ("Implemented", impl, False),
-            ("Partially implemented", part, True),
-            ("Not implemented", miss, True),
-            ("Unclear / needs human review", unclear, False),
-        ]
-        for label, bucket, include_suggestion in section:
-            if not bucket:
-                continue
-            lines.append(f"{label}:")
-            lines.extend(_format_bucket_by_slide(bucket, include_suggestion))
+        for title, impl, part, miss, unclear in [
+            ("Tags", tags_impl, tags_part, tags_miss, tags_unclear),
+            ("Email", email_impl, email_part, email_miss, email_unclear),
+        ]:
+            lines.append(f"{title}:")
+            section = [
+                ("Implemented", impl, False),
+                ("Partially implemented", part, True),
+                ("Not implemented", miss, True),
+                ("Unclear / needs human review", unclear, False),
+            ]
+            for label, bucket, include_suggestion in section:
+                if not bucket:
+                    continue
+                lines.append(f"{label}:")
+                lines.extend(_format_bucket_by_slide(bucket, include_suggestion))
+                lines.append("")
             lines.append("")
-        lines.append("")
 
     if tick_tie is not None:
         lines.append("Tick & tie review:")
-        ties_out = tick_tie.get("ties_out") or []
-        check = tick_tie.get("check") or []
-        if ties_out:
-            lines.append("- Consistent:")
-            for item in ties_out:
-                pages = ", ".join(str(p) for p in item.get("pages", []))
-                lines.append(f"  - {item.get('metric_label')}: {item.get('canonical_value')} (pages {pages})")
-        if check:
-            lines.append("- Inconsistencies to review:")
-            for item in check:
-                lines.append(f"  - {item.get('metric_label')}:")
-                for vb in item.get("values_by_page", []):
-                    lines.append(f"    - Page {vb.get('page')}: {vb.get('value')}")
-                if item.get("reason"):
-                    lines.append(f"    Reason: {item['reason']}")
+        if isinstance(tick_tie, list):
+            ties_out = tick_tie
+            check = []
+        else:
+            ties_out = tick_tie.get("ties_out") or []
+            check = tick_tie.get("check") or []
+        if not ties_out and not check:
+            lines.append("- No duplicate values in deck.")
+            lines.append("")
+        else:
+            if ties_out:
+                lines.append("- Consistent:")
+                for item in ties_out:
+                    pages = ", ".join(str(p) for p in item.get("pages", []))
+                    lines.append(f"  - {item.get('metric_label')}: {item.get('canonical_value')} (pages {pages})")
+            if check:
+                lines.append("- Inconsistencies to review:")
+                for item in check:
+                    lines.append(f"  - {item.get('metric_label')}:")
+                    for vb in item.get("values_by_page", []):
+                        lines.append(f"    - Page {vb.get('page')}: {vb.get('value')}")
+                    if item.get("reason"):
+                        lines.append(f"    Reason: {item['reason']}")
 
     return "\n".join(lines)
 
@@ -331,8 +342,9 @@ def process_one_email(raw_msg: bytes):
     tags_comments = result.get("tags", [])
     email_comments = result.get("email_comments", [])
     tick_tie = result.get("tick_tie")
+    only_tick = result.get("only_tick", False)
 
-    summary = format_summary(tags_comments, email_comments, tick_tie)
+    summary = format_summary(tags_comments, email_comments, tick_tie, show_comments=not only_tick)
 
     # Send reply to yourself (or to original sender)
     send_email(
@@ -359,26 +371,38 @@ def send_email(to_addr: str, subject: str, body: str):
 def poll_inbox():
     """Simple one-shot poll: fetch unread emails, process, mark as seen."""
     mail = imaplib.IMAP4_SSL(IMAP_HOST)
-    mail.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-    mail.select("INBOX")
+    try:
+        mail.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        mail.select("INBOX")
 
-    typ, data = mail.search(None, "UNSEEN")
-    if typ != "OK":
-        print("No messages found.")
-        return
-
-    for num in data[0].split():
-        typ, msg_data = mail.fetch(num, "(RFC822)")
+        typ, data = mail.search(None, "UNSEEN")
         if typ != "OK":
-            continue
-        raw_msg = msg_data[0][1]
-        print(f"Processing message UID {num.decode()}")
-        process_one_email(raw_msg)
-        # Mark as seen (already handled)
-        mail.store(num, "+FLAGS", "\\Seen")
+            print("No messages found.")
+            return
 
-    mail.close()
-    mail.logout()
+        for num in data[0].split():
+            try:
+                typ, msg_data = mail.fetch(num, "(RFC822)")
+                if typ != "OK":
+                    continue
+                raw_msg = msg_data[0][1]
+                print(f"Processing message UID {num.decode()}")
+                process_one_email(raw_msg)
+                # Mark as seen (already handled)
+                mail.store(num, "+FLAGS", "\\Seen")
+            except imaplib.IMAP4.abort as exc:
+                # Connection dropped mid-loop; log and break out
+                print(f"IMAP connection aborted while processing UID {num.decode()}: {exc}")
+                break
+    finally:
+        try:
+            mail.close()
+        except Exception:
+            pass
+        try:
+            mail.logout()
+        except Exception:
+            pass
 
 
 def _choose_original_and_revised(attachments: List[dict]) -> Tuple[dict, dict]:
