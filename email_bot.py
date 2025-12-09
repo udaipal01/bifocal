@@ -7,17 +7,15 @@ import re
 from email.message import EmailMessage
 from email.parser import BytesParser
 from email.policy import default as default_policy
-from dotenv import load_dotenv
+from typing import Callable, List, Optional, Tuple
 
-from typing import List, Optional, Tuple
-
+from PyPDF2 import PdfReader
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
+from dotenv import load_dotenv
 
 # Load environment before importing modules that rely on OPENAI_API_KEY
-from dotenv import load_dotenv
 load_dotenv()
-
 from agent_runner import run_agent_workflow  # noqa: E402
 
 IMAP_HOST = os.getenv("EMAIL_IMAP_HOST", "imap.gmail.com")
@@ -46,6 +44,27 @@ def pptx_to_struct(path: str) -> dict:
             "text": "\n".join(t for t in texts if t).strip()
         })
     return {"slides": slides}
+
+
+def pdf_to_struct(path: str) -> dict:
+    """Convert a PDF file into the same slide structure (page-per-slide)."""
+    reader = PdfReader(path)
+    slides = []
+    for i, page in enumerate(reader.pages, start=1):
+        text = page.extract_text() or ""
+        slides.append({
+            "index": i,
+            "text": text.strip()
+        })
+    return {"slides": slides}
+
+
+def attachment_to_struct(attachment: dict) -> dict:
+    filename = attachment.get("filename") or ""
+    ext = os.path.splitext(filename)[1].lower()
+    if ext == ".pdf":
+        return pdf_to_struct(attachment["path"])
+    return pptx_to_struct(attachment["path"])
 
 
 def _extract_notes_text(slide) -> str:
@@ -321,22 +340,22 @@ def process_one_email(raw_msg: bytes):
     email_text, attachments, from_addr, subject, message_id = \
         extract_body_and_attachments(raw_msg)
 
-    pptx_attachments = [
+    valid_attachments = [
         att for att in attachments
-        if att["filename"] and att["filename"].lower().endswith(".pptx")
+        if att["filename"] and os.path.splitext(att["filename"])[1].lower() in {".pptx", ".pdf"}
     ]
 
-    if len(pptx_attachments) == 0:
-        print("No PPTX attachments found; skipping.")
+    if len(valid_attachments) == 0:
+        print("No supported attachments found; skipping.")
         return
-    elif len(pptx_attachments) == 1:
-        revised_att = pptx_attachments[0]
-        original_doc = {}
-        revised_doc = pptx_to_struct(revised_att["path"])
+    elif len(valid_attachments) == 1:
+        revised_att = valid_attachments[0]
+        original_doc = {"slides": []}
+        revised_doc = attachment_to_struct(revised_att)
     else:
-        original_att, revised_att = _choose_original_and_revised(pptx_attachments)
-        original_doc = pptx_to_struct(original_att["path"])
-        revised_doc = pptx_to_struct(revised_att["path"])
+        original_att, revised_att = _choose_original_and_revised(valid_attachments)
+        original_doc = attachment_to_struct(original_att)
+        revised_doc = attachment_to_struct(revised_att)
 
     result = run_agent(email_text, original_doc, revised_doc)
     tags_comments = result.get("tags", [])

@@ -32,7 +32,7 @@ class EvaluateCommentsContext:
 def evaluate_comments_instructions(run_context: RunContextWrapper[EvaluateCommentsContext], _agent: Agent[EvaluateCommentsContext]):
   state_original_doc = run_context.context.state_original_doc
   state_revised_doc = run_context.context.state_revised_doc
-  return f"""Using the parsed comments from {{node[\"Email Compiler\"].output_parsed.comments}},
+  return f"""Using the parsed comments from {{node[\"Email Comments\"].output_parsed.comments}},
 compare each comment against {state_original_doc} and {state_revised_doc}.
 
 For each comment:
@@ -85,7 +85,11 @@ Ignore polite phrases (“thank you”, “hope all is well”) and non-actionab
 
 Your output must be a JSON object with a single field — comments — which is an array of {{id, text, slide_refs}} following the provided schema.
 
-Use {state_email_text} as the source email text."""
+Use {state_email_text} as the source email text.
+
+Rules:
+If there are no actionable comments in the email text, you must return an empty array.
+Only include comments in the email text as part of the comment list. Do not include comments that are embedded in either of the decks. """
 email_comments = Agent(
   name="Email Comments",
   instructions=email_comments_instructions,
