@@ -1,3 +1,4 @@
+import json
 from pydantic import BaseModel
 from agents import RunContextWrapper, Agent, ModelSettings, TResponseInputItem, Runner, RunConfig, trace
 
@@ -149,18 +150,19 @@ class WorkflowInput(BaseModel):
 # Main code entrypoint
 async def run_workflow(workflow_input: WorkflowInput):
   with trace("Bifocal_Tick and Tie"):
-    state = {
-      "email_text": None,
-      "revised_doc": None
-    }
     workflow = workflow_input.model_dump()
+    parsed_input = json.loads(workflow["input_as_text"])
+    state = {
+      "email_text": parsed_input.get("email_text") or "",
+      "revised_doc": json.dumps(parsed_input.get("revised_doc", {}), indent=2)
+    }
     conversation_history: list[TResponseInputItem] = [
       {
         "role": "user",
         "content": [
           {
             "type": "input_text",
-            "text": workflow["input_as_text"]
+            "text": state["email_text"]
           }
         ]
       }
@@ -200,12 +202,4 @@ async def run_workflow(workflow_input: WorkflowInput):
       "output_text": check_across_document_result_temp.final_output.json(),
       "output_parsed": check_across_document_result_temp.final_output.model_dump()
     }
-    end_result = {
-      "ties_out": [
-
-      ],
-      "check": [
-
-      ]
-    }
-    return end_result
+    return check_across_document_result["output_parsed"]
